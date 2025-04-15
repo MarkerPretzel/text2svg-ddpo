@@ -27,6 +27,14 @@ def from_file(path, low=None, high=None):
     prompts = _load_lines(path)[low:high]
     return random.choice(prompts), {}
 
+def styled_animals():
+    animals = _load_lines("simple_animals.txt")
+    animal = random.choice(animals)
+    # style = "lineal color space . cartoony . simple shapes. limited colors . solid shapes and flat colors . simple scene . flat background . objects represented through simple shapes . looks like a colored in a toddler coloring book"
+    # style = "lineal color space . childrens cartoon . simple shapes. limited colors . solid shapes and flat colors . simple scene . flat background . objects represented through simple shapes"
+    style = "easily transformed into an SVG . looks like an clipart or icon . limited lineal colors . cartoony . simple solid shapes and flat colors . simple singular subject . flat background . objects represented through simple shapes"
+    # Return both the full styled prompt and metadata with the animal name
+    return f"depicting a {animal} {style}", {"base_animal": animal}
 
 def imagenet_all():
     return from_file("imagenet_classes.txt")
