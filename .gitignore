@@ -306,3 +306,7 @@ tags
 wandb/
 logs/
 notebooks/
+
+# slurm job files
+*.err
+*.out
