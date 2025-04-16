@@ -22,9 +22,9 @@ def clip_compressibility_combined(clip_weight=0.7, compress_weight=0.3):
     from PIL import Image
     from transformers import CLIPProcessor, CLIPModel
     
-    # Initialize CLIP model for image-text similarity
-    model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").cuda()
-    processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+    # Initialize CLIP model and processor only when needed
+    model = None
+    processor = None
     
     # Normalize weights to ensure they sum to 1
     total = clip_weight + compress_weight
@@ -32,7 +32,25 @@ def clip_compressibility_combined(clip_weight=0.7, compress_weight=0.3):
     compress_weight = compress_weight / total
     
     def _fn(images, prompts, metadata):
+        nonlocal model, processor
+        
+        # Initialize model on first call (lazy initialization on correct device)
+        if model is None or processor is None:
+            # Get the device based on process rank in distributed training
+            if torch.distributed.is_initialized():
+                device = torch.device(f"cuda:{torch.distributed.get_rank()}")
+            else:
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            
+            model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+            processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        
+        # Get the device of the model
+        device = next(model.parameters()).device
+        
+        # Process the input images
         if isinstance(images, torch.Tensor):
+            # Ensure the images tensor is on the CPU before converting to numpy
             images = (images * 255).round().clamp(0, 255).to(torch.uint8).cpu().numpy()
             images = images.transpose(0, 2, 3, 1)  # NCHW -> NHWC
         
@@ -47,7 +65,7 @@ def clip_compressibility_combined(clip_weight=0.7, compress_weight=0.3):
         # Get file sizes in KB - smaller is better for compressibility
         sizes = np.array([buffer.tell() / 1000 for buffer in buffers])
         
-        # 3. Normalize the compressibility scores to 0-1 range
+        # Normalize the compressibility scores to 0-1 range
         max_size = 100.0  # KB - use this as our reference point
         compress_scores = np.clip(1.0 - (sizes / max_size), 0.0, 1.0)
         
@@ -63,24 +81,49 @@ def clip_compressibility_combined(clip_weight=0.7, compress_weight=0.3):
         
         # Process with CLIP
         with torch.no_grad():
+            # Process inputs and move to the correct device
             inputs = processor(text=animal_terms, images=pil_images, return_tensors="pt", padding=True)
-            inputs = {k: v.to("cuda") for k, v in inputs.items()}
+            inputs = {k: v.to(device) for k, v in inputs.items()}
             
-            # Get features and calculate similarity
-            image_features = model.get_image_features(inputs['pixel_values'])
-            text_features = model.get_text_features(inputs['input_ids'], inputs['attention_mask'])
-            
-            # Normalize
-            image_features = image_features / image_features.norm(dim=-1, keepdim=True)
-            text_features = text_features / text_features.norm(dim=-1, keepdim=True)
-            
-            # Calculate similarity scores
-            clip_scores = torch.sum(image_features * text_features, dim=1).cpu().numpy()
+            try:
+                # Get features and calculate similarity
+                image_features = model.get_image_features(inputs['pixel_values'])
+                text_features = model.get_text_features(inputs['input_ids'], inputs['attention_mask'])
+                
+                # Normalize
+                image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+                text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                
+                # Calculate similarity scores
+                clip_scores = torch.sum(image_features * text_features, dim=1).cpu().numpy()
+            except RuntimeError as e:
+                # Handle potential device errors
+                if "expected all tensors to be on the same device" in str(e).lower():
+                    print(f"Device mismatch error. Model on {device}, inputs on various devices")
+                    # Forcefully move everything to CPU as a fallback
+                    model.to("cpu")
+                    inputs = {k: v.to("cpu") for k, v in inputs.items()}
+                    
+                    # Retry with all on CPU
+                    image_features = model.get_image_features(inputs['pixel_values'])
+                    text_features = model.get_text_features(inputs['input_ids'], inputs['attention_mask'])
+                    
+                    # Normalize
+                    image_features = image_features / image_features.norm(dim=-1, keepdim=True)
+                    text_features = text_features / text_features.norm(dim=-1, keepdim=True)
+                    
+                    # Calculate similarity scores
+                    clip_scores = torch.sum(image_features * text_features, dim=1).cpu().numpy()
+                    
+                    # Move model back to original device
+                    model.to(device)
+                else:
+                    raise
         
         # Clip scores are already in a good range (0-1) from cosine similarity
         clip_scores = np.clip(clip_scores, 0, 1)
         
-        # 4. Combine the rewards with weighting
+        # Combine the rewards with weighting
         combined_scores = (clip_weight * clip_scores) + (compress_weight * compress_scores)
         
         # Return combined scores and metadata for analysis
