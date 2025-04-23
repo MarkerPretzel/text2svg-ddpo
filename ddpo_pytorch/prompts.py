@@ -27,6 +27,13 @@ def from_file(path, low=None, high=None):
     prompts = _load_lines(path)[low:high]
     return random.choice(prompts), {}
 
+def augmented_test_prompts():
+    base_prompts = _load_lines("500_prompts.txt")
+    base_prompt = random.choice(base_prompts)
+    style = "easily transformed into an SVG . looks like an clipart or icon . limited lineal colors . cartoony . simple solid shapes and flat colors . simple singular subject . flat background . objects represented through simple shapes"
+    # Return both the full styled prompt and metadata with the base prompt
+    return f"depicting a {base_prompt} {style}", {"base_prompt": base_prompt}
+
 def styled_animals():
     animals = _load_lines("simple_animals.txt")
     animal = random.choice(animals)
